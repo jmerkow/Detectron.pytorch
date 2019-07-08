@@ -250,7 +250,7 @@ class Generalized_RCNN(nn.Module):
         return return_dict
 
     def roi_feature_transform(self, blobs_in, rpn_ret, blob_rois='rois', method='RoIPoolF',
-                              resolution=7, spatial_scale=1. / 16., sampling_ratio=0):
+                              resolution=7, spatial_scale=1. / 16., sampling_ratio=0, panet=False):
         """Add the specified RoI pooling method. The sampling_ratio argument
         is supported for some, but not all, RoI transform methods.
 
@@ -271,7 +271,10 @@ class Generalized_RCNN(nn.Module):
             for lvl in range(k_min, k_max + 1):
                 bl_in = blobs_in[k_max - lvl]  # blobs_in is in reversed order
                 sc = spatial_scale[k_max - lvl]  # in reversed order
-                bl_rois = blob_rois + '_fpn' + str(lvl)
+                if not panet:
+                    bl_rois = blob_rois + '_fpn' + str(lvl)
+                else:
+                    bl_rois = blob_rois
                 if len(rpn_ret[bl_rois]):
                     rois = Variable(torch.from_numpy(rpn_ret[bl_rois])).cuda(device_id)
                     if method == 'RoIPoolF':
@@ -290,17 +293,19 @@ class Generalized_RCNN(nn.Module):
                         xform_out = RoIAlignFunction(
                             resolution, resolution, sc, sampling_ratio)(bl_in, rois)
                     bl_out_list.append(xform_out)
+            if not panet:
+                # The pooled features from all levels are concatenated along the
+                # batch dimension into a single 4D tensor.
+                xform_shuffled = torch.cat(bl_out_list, dim=0)
 
-            # The pooled features from all levels are concatenated along the
-            # batch dimension into a single 4D tensor.
-            xform_shuffled = torch.cat(bl_out_list, dim=0)
-
-            # Unshuffle to match rois from dataloader
-            device_id = xform_shuffled.get_device()
-            restore_bl = rpn_ret[blob_rois + '_idx_restore_int32']
-            restore_bl = Variable(
-                torch.from_numpy(restore_bl.astype('int64', copy=False))).cuda(device_id)
-            xform_out = xform_shuffled[restore_bl]
+                # Unshuffle to match rois from dataloader
+                device_id = xform_shuffled.get_device()
+                restore_bl = rpn_ret[blob_rois + '_idx_restore_int32']
+                restore_bl = Variable(
+                    torch.from_numpy(restore_bl.astype('int64', copy=False))).cuda(device_id)
+                xform_out = xform_shuffled[restore_bl]
+            else:
+                return bl_out_list
         else:
             # Single feature level
             # rois: holds R regions of interest, each is a 5-tuple

@@ -30,6 +30,12 @@ def fpn_ResNet50_conv5_body():
         ResNet.ResNet50_conv5_body, fpn_level_info_ResNet50_conv5()
     )
 
+def fpn_ResNet50_conv5_body_bup():
+    return fpn(
+        ResNet.ResNet50_conv5_body, fpn_level_info_ResNet50_conv5(),
+        panet_buttomup=True
+    )
+
 
 def fpn_ResNet50_conv5_P2only_body():
     return fpn(
@@ -77,10 +83,11 @@ class fpn(nn.Module):
     similarly for fpn_level_info.dims: e.g [2048, 1024, 512, 256]
     similarly for spatial_scale: e.g [1/32, 1/16, 1/8, 1/4]
     """
-    def __init__(self, conv_body_func, fpn_level_info, P2only=False):
+    def __init__(self, conv_body_func, fpn_level_info, P2only=False, panet_buttomup=False):
         super().__init__()
         self.fpn_level_info = fpn_level_info
         self.P2only = P2only
+        self.panet_buttomup = panet_buttomup
 
         self.dim_out = fpn_dim = cfg.FPN.DIM
         min_level, max_level = get_min_max_levels()
@@ -125,6 +132,35 @@ class fpn(nn.Module):
 
             self.spatial_scale.append(fpn_level_info.spatial_scales[i])
 
+        # add for panet buttom-up path
+        if self.panet_buttomup:
+            self.panet_buttomup_conv1_modules = nn.ModuleList()
+            self.panet_buttomup_conv2_modules = nn.ModuleList()
+            for i in range(self.num_backbone_stages - 1):
+                if cfg.FPN.USE_GN:
+                    self.panet_buttomup_conv1_modules.append(nn.Sequential(
+                        nn.Conv2d(fpn_dim, fpn_dim, 3, 2, 1, bias=True),
+                        nn.GroupNorm(net_utils.get_group_gn(fpn_dim), fpn_dim,
+                                    eps=cfg.GROUP_NORM.EPSILON),
+                        nn.ReLU(inplace=True)
+                    ))
+                    self.panet_buttomup_conv2_modules.append(nn.Sequential(
+                        nn.Conv2d(fpn_dim, fpn_dim, 3, 1, 1, bias=True),
+                        nn.GroupNorm(net_utils.get_group_gn(fpn_dim), fpn_dim,
+                                    eps=cfg.GROUP_NORM.EPSILON),
+                        nn.ReLU(inplace=True)
+                    ))
+                else:
+                    self.panet_buttomup_conv1_modules.append(
+                        nn.Conv2d(fpn_dim, fpn_dim, 3, 2, 1)
+                    )
+                    self.panet_buttomup_conv2_modules.append(
+                        nn.Conv2d(fpn_dim, fpn_dim, 3, 1, 1)
+                    )
+
+                #self.spatial_scale.append(fpn_level_info.spatial_scales[i])
+
+
         #
         # Step 2: build up starting from the coarsest backbone level
         #
@@ -160,6 +196,7 @@ class fpn(nn.Module):
         def init_func(m):
             if isinstance(m, nn.Conv2d):
                 mynn.init.XavierFill(m.weight)
+                #mynn.init.MSRAFill(m.weight)
                 if m.bias is not None:
                     init.constant_(m.bias, 0)
 
@@ -236,10 +273,25 @@ class fpn(nn.Module):
                 self.topdown_lateral_modules[i](fpn_inner_blobs[-1], conv_body_blobs[-(i+2)])
             )
         fpn_output_blobs = []
+        if self.panet_buttomup:
+            fpn_middle_blobs = []
         for i in range(self.num_backbone_stages):
-            fpn_output_blobs.append(
-                self.posthoc_modules[i](fpn_inner_blobs[i])
-            )
+            if not self.panet_buttomup:
+                fpn_output_blobs.append(
+                    self.posthoc_modules[i](fpn_inner_blobs[i])
+                )
+            else:
+                fpn_middle_blobs.append(
+                    self.posthoc_modules[i](fpn_inner_blobs[i])
+                )
+        if self.panet_buttomup:
+            fpn_output_blobs.append(fpn_middle_blobs[-1])
+            for i in range(2, self.num_backbone_stages + 1):
+                fpn_tmp = self.panet_buttomup_conv1_modules[i - 2](fpn_output_blobs[0])
+                #print(fpn_middle_blobs[self.num_backbone_stages - i].size())
+                fpn_tmp = fpn_tmp + fpn_middle_blobs[self.num_backbone_stages - i]
+                fpn_tmp = self.panet_buttomup_conv2_modules[i - 2](fpn_tmp)
+                fpn_output_blobs.insert(0, fpn_tmp)        
 
         if hasattr(self, 'maxpool_p6'):
             fpn_output_blobs.insert(0, self.maxpool_p6(fpn_output_blobs[0]))
